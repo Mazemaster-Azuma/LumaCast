@@ -150,21 +150,50 @@ jobs:
         run: |
           if [[ -n "$KEYSTORE_B64" && -n "$STORE_PW" && -n "$KEY_PW" ]]; then
             RESOLVED_ALIAS="${KEY_ALIAS_SECRET:-upload}"
-            printf '%s' "$KEYSTORE_B64" | tr -d '\r\n ' | base64 -d > "${{ runner.temp }}/upload-keystore.jks"
-            keytool -list \
-              -keystore "${{ runner.temp }}/upload-keystore.jks" \
-              -storepass "$STORE_PW" \
-              -alias "$RESOLVED_ALIAS" >/dev/null
+            KEYSTORE_FILE="${{ runner.temp }}/upload-keystore.jks"
+            VERIFY_FILE="${{ runner.temp }}/verify-key.p12"
+
+            if ! printf '%s' "$KEYSTORE_B64" | tr -d '\r\n ' | base64 -d > "$KEYSTORE_FILE" || [[ ! -s "$KEYSTORE_FILE" ]]; then
+              echo "::error::ANDROID_KEYSTORE_BASE64 could not be decoded. Re-encode with 'base64 -w 0 my-upload-key.jks' and update the secret."
+              exit 1
+            fi
+
+            if ! keytool -list -keystore "$KEYSTORE_FILE" -storepass "$STORE_PW" >/dev/null 2>&1; then
+              echo "::error::Could not open keystore with STORE_PASSWORD. Verify ANDROID_KEYSTORE_BASE64 and STORE_PASSWORD."
+              exit 1
+            fi
+
+            if ! keytool -list -keystore "$KEYSTORE_FILE" -storepass "$STORE_PW" -alias "$RESOLVED_ALIAS" >/dev/null 2>&1; then
+              echo "::error::KEY_ALIAS was not found in the keystore. Verify KEY_ALIAS matches the -alias used in keytool -genkeypair."
+              exit 1
+            fi
+
+            rm -f "$VERIFY_FILE"
+            if ! keytool -importkeystore \
+              -srckeystore "$KEYSTORE_FILE" \
+              -srcstorepass "$STORE_PW" \
+              -srckeypass "$KEY_PW" \
+              -srcalias "$RESOLVED_ALIAS" \
+              -destkeystore "$VERIFY_FILE" \
+              -deststoretype PKCS12 \
+              -deststorepass "verify123456" \
+              -noprompt >/dev/null 2>&1; then
+              rm -f "$VERIFY_FILE"
+              echo "::error::KEY_PASSWORD failed to unlock the private key. For PKCS12 keystores, KEY_PASSWORD must match STORE_PASSWORD."
+              exit 1
+            fi
+            rm -f "$VERIFY_FILE"
+
+            echo "Release keystore, alias, store password, and key password verified."
             echo "has_release_key=true" >> "$GITHUB_OUTPUT"
-            echo "key_alias=${RESOLVED_ALIAS}" >> "$GITHUB_OUTPUT"
           else
+            echo "Release signing secrets not all configured; falling back to Debug APK."
             echo "has_release_key=false" >> "$GITHUB_OUTPUT"
-            echo "key_alias=upload" >> "$GITHUB_OUTPUT"
           fi
 
       - name: Run unit & Robolectric tests
         run: >
-          gradle :app:testDebugUnitTest --no-daemon --stacktrace
+          gradle :app:testDebugUnitTest --no-daemon --no-configuration-cache --console=plain
           -PappVersionName="${{ steps.meta.outputs.version_name }}"
           -PappVersionCode="${{ steps.meta.outputs.version_code }}"
           -PgithubRepo="${{ github.repository }}"
@@ -174,10 +203,10 @@ jobs:
         env:
           KEYSTORE_PATH: ${{ runner.temp }}/upload-keystore.jks
           STORE_PASSWORD: ${{ secrets.STORE_PASSWORD }}
-          KEY_ALIAS: ${{ steps.signing.outputs.key_alias }}
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
           KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
         run: >
-          gradle :app:assembleRelease --no-daemon --stacktrace
+          gradle :app:assembleRelease --no-daemon --no-configuration-cache --console=plain
           -PappVersionName="${{ steps.meta.outputs.version_name }}"
           -PappVersionCode="${{ steps.meta.outputs.version_code }}"
           -PgithubRepo="${{ github.repository }}"
@@ -185,7 +214,7 @@ jobs:
       - name: Build Debug APK (consistent debug keystore fallback)
         if: steps.signing.outputs.has_release_key != 'true'
         run: >
-          gradle :app:assembleDebug --no-daemon --stacktrace
+          gradle :app:assembleDebug --no-daemon --no-configuration-cache --console=plain
           -PappVersionName="${{ steps.meta.outputs.version_name }}"
           -PappVersionCode="${{ steps.meta.outputs.version_code }}"
           -PgithubRepo="${{ github.repository }}"
