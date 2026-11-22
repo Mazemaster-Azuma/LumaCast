@@ -35,11 +35,19 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Set up JDK 17
+      - name: Set up JDK 21
         uses: actions/setup-java@v4
         with:
           distribution: temurin
-          java-version: "17"
+          java-version: "21"
+
+      - name: Cache Robolectric Android SDK jars
+        uses: actions/cache@v4
+        with:
+          path: ~/.m2/repository/org/robolectric
+          key: robolectric-sdk-${{ runner.os }}-${{ hashFiles('gradle/libs.versions.toml') }}
+          restore-keys: |
+            robolectric-sdk-${{ runner.os }}-
 
       - name: Set up Gradle 9.3.1
         uses: gradle/actions/setup-gradle@v4
@@ -123,7 +131,7 @@ jobs:
 
       - name: Run unit & Robolectric tests
         run: >
-          gradle :app:testDebugUnitTest --no-daemon
+          gradle :app:testDebugUnitTest --no-daemon --stacktrace
           -PappVersionName="${{ steps.meta.outputs.version_name }}"
           -PappVersionCode="${{ steps.meta.outputs.version_code }}"
           -PgithubRepo="${{ github.repository }}"
