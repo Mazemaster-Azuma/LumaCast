@@ -104,12 +104,40 @@ jobs:
           echo "should_release=${SHOULD_RELEASE}" >> "$GITHUB_OUTPUT"
           echo "is_prerelease=${IS_PRERELEASE}" >> "$GITHUB_OUTPUT"
 
-      - name: Restore consistent debug keystore
+      - name: Prepare debug keystore
+        id: debug_key
         shell: bash
+        env:
+          DEBUG_KEYSTORE_B64: ${{ secrets.DEBUG_KEYSTORE_BASE64 }}
         run: |
-          if [[ ! -f debug.keystore && -f debug.keystore.base64 ]]; then
-            base64 -d debug.keystore.base64 > debug.keystore
+          KEY_SOURCE="existing debug.keystore"
+          if [[ ! -f debug.keystore ]]; then
+            if [[ -n "$DEBUG_KEYSTORE_B64" ]]; then
+              printf '%s' "$DEBUG_KEYSTORE_B64" | tr -d '\r\n ' | base64 -d > debug.keystore || true
+              KEY_SOURCE="Debug (DEBUG_KEYSTORE_BASE64 secret)"
+            elif [[ -f debug.keystore.base64 ]]; then
+              tr -d '\r\n ' < debug.keystore.base64 | base64 -d > debug.keystore || true
+              KEY_SOURCE="Debug (consistent CI keystore)"
+            fi
           fi
+
+          if [[ ! -s debug.keystore ]] || ! keytool -list -keystore debug.keystore -storepass android -alias androiddebugkey >/dev/null 2>&1; then
+            echo "::warning::debug.keystore was missing or invalid (debug.keystore.base64 not found in repo or DEBUG_KEYSTORE_BASE64 secret not set). Generating a fresh debug keystore for this build. To allow in-place in-app updates across releases, configure ANDROID_KEYSTORE_BASE64, STORE_PASSWORD, KEY_ALIAS, and KEY_PASSWORD (or DEBUG_KEYSTORE_BASE64) in GitHub Repository Secrets."
+            rm -f debug.keystore
+            keytool -genkeypair \
+              -keystore debug.keystore \
+              -storetype PKCS12 \
+              -storepass android \
+              -keypass android \
+              -alias androiddebugkey \
+              -keyalg RSA \
+              -keysize 2048 \
+              -validity 10000 \
+              -dname "CN=Android Debug,O=Android,C=US"
+            KEY_SOURCE="Debug (ephemeral CI keystore)"
+          fi
+
+          echo "source=${KEY_SOURCE}" >> "$GITHUB_OUTPUT"
 
       - name: Check release signing secrets
         id: signing
@@ -121,9 +149,14 @@ jobs:
           KEY_ALIAS_SECRET: ${{ secrets.KEY_ALIAS }}
         run: |
           if [[ -n "$KEYSTORE_B64" && -n "$STORE_PW" && -n "$KEY_PW" ]]; then
-            echo "$KEYSTORE_B64" | base64 -d > "${{ runner.temp }}/upload-keystore.jks"
+            RESOLVED_ALIAS="${KEY_ALIAS_SECRET:-upload}"
+            printf '%s' "$KEYSTORE_B64" | tr -d '\r\n ' | base64 -d > "${{ runner.temp }}/upload-keystore.jks"
+            keytool -list \
+              -keystore "${{ runner.temp }}/upload-keystore.jks" \
+              -storepass "$STORE_PW" \
+              -alias "$RESOLVED_ALIAS" >/dev/null
             echo "has_release_key=true" >> "$GITHUB_OUTPUT"
-            echo "key_alias=${KEY_ALIAS_SECRET:-upload}" >> "$GITHUB_OUTPUT"
+            echo "key_alias=${RESOLVED_ALIAS}" >> "$GITHUB_OUTPUT"
           else
             echo "has_release_key=false" >> "$GITHUB_OUTPUT"
             echo "key_alias=upload" >> "$GITHUB_OUTPUT"
@@ -144,7 +177,7 @@ jobs:
           KEY_ALIAS: ${{ steps.signing.outputs.key_alias }}
           KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
         run: >
-          gradle :app:assembleRelease --no-daemon
+          gradle :app:assembleRelease --no-daemon --stacktrace
           -PappVersionName="${{ steps.meta.outputs.version_name }}"
           -PappVersionCode="${{ steps.meta.outputs.version_code }}"
           -PgithubRepo="${{ github.repository }}"
@@ -152,7 +185,7 @@ jobs:
       - name: Build Debug APK (consistent debug keystore fallback)
         if: steps.signing.outputs.has_release_key != 'true'
         run: >
-          gradle :app:assembleDebug --no-daemon
+          gradle :app:assembleDebug --no-daemon --stacktrace
           -PappVersionName="${{ steps.meta.outputs.version_name }}"
           -PappVersionCode="${{ steps.meta.outputs.version_code }}"
           -PgithubRepo="${{ github.repository }}"
@@ -174,7 +207,7 @@ jobs:
             BUILD_VARIANT="Release"
           else
             SRC_APK="app/build/outputs/apk/debug/app-debug.apk"
-            BUILD_VARIANT="Debug (consistent CI keystore)"
+            BUILD_VARIANT="${{ steps.debug_key.outputs.source }}"
           fi
 
           cp "$SRC_APK" "dist/${APK_NAME}"
