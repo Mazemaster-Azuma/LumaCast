@@ -1,0 +1,22 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>LumaCast Custom Web Receiver</title>
+  <link rel="stylesheet" href="styles.css" />
+  <!-- Official Google Cast Web Receiver SDK v3 -->
+  <script src="https://www.gstatic.com/cast/sdk/libs/caf_receiver/v3/cast_receiver_framework.js"></script>
+</head>
+<body>
+  <cast-media-player id="media-player"></cast-media-player>
+
+  <!-- TV-side timed bitmap subtitle overlay for PGS / VobSub tracks (never rendered on phone) -->
+  <div id="bitmap-subtitle-layer" class="bitmap-subtitle-layer" aria-live="polite">
+    <canvas id="bitmap-subtitle-canvas"></canvas>
+    <div id="bitmap-subtitle-fallback-caption" class="bitmap-caption"></div>
+  </div>
+
+  <script src="receiver.js"></script>
+</body>
+</html>

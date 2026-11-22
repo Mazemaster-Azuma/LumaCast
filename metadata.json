@@ -1,0 +1,6 @@
+{
+  "name": "LumaCast",
+  "description": "Native Android local video Chromecast player with embedded HTTP range streaming, media compatibility analysis, and remote playback controls.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
