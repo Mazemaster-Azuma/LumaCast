@@ -10,6 +10,7 @@ import com.example.core.common.AudioTrackInfo
 import com.example.core.common.CastConnectionState
 import com.example.core.common.CastDeviceInfo
 import com.example.core.common.CastError
+import com.example.core.common.ImageItem
 import com.example.core.common.PlaybackStrategy
 import com.example.core.common.RemotePlaybackState
 import com.example.core.common.RemotePlayerStatus
@@ -512,6 +513,59 @@ class CastSessionController(
                         )
                     }
                     onResult(Result.failure(IllegalStateException(result.status.statusMessage ?: err.message)))
+                }
+            }
+        }
+    }
+
+    /**
+     * Loads a local photo onto the connected Chromecast using `MEDIA_TYPE_PHOTO`.
+     */
+    fun loadImage(
+        image: ImageItem,
+        streamUrl: String,
+        mimeType: String,
+        onResult: (Result<Unit>) -> Unit
+    ) {
+        mainHandler.post {
+            val session = activeCastSession ?: sessionManager?.currentCastSession
+            val client = session?.remoteMediaClient
+            if (session == null || !session.isConnected || client == null) {
+                onResult(Result.failure(IllegalStateException("No active Chromecast session.")))
+                return@post
+            }
+
+            val metadata = MediaMetadata(MediaMetadata.MEDIA_TYPE_PHOTO).apply {
+                putString(MediaMetadata.KEY_TITLE, image.title)
+                putString(
+                    MediaMetadata.KEY_SUBTITLE,
+                    "${image.exactResolutionLabel} · ${image.formatLabel} · LumaCast"
+                )
+            }
+
+            val mediaInfo = MediaInfo.Builder(streamUrl)
+                .setStreamType(MediaInfo.STREAM_TYPE_NONE)
+                .setContentType(mimeType)
+                .setMetadata(metadata)
+                .build()
+
+            val loadRequest = MediaLoadRequestData.Builder()
+                .setMediaInfo(mediaInfo)
+                .setAutoplay(true)
+                .build()
+
+            client.load(loadRequest).setResultCallback { result ->
+                if (result.status.isSuccess) {
+                    _playbackState.update { state ->
+                        state.copy(
+                            activeStreamUrl = streamUrl,
+                            playbackQualityLabel = "${image.formatLabel} · ${image.exactResolutionLabel}",
+                            lastError = null
+                        )
+                    }
+                    onResult(Result.success(Unit))
+                } else {
+                    onResult(Result.failure(IllegalStateException(result.status.statusMessage ?: "Failed to display photo on TV.")))
                 }
             }
         }

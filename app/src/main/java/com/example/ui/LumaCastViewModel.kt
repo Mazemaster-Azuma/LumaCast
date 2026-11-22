@@ -17,9 +17,12 @@ import com.example.core.common.CastPipelineState
 import com.example.core.common.CompatibilityReport
 import com.example.core.common.ConversionTelemetry
 import com.example.core.common.Formatters
+import com.example.core.common.ImageItem
 import com.example.core.common.IndexedFolder
 import com.example.core.common.LibraryAccessState
 import com.example.core.common.LiveTrackConversionState
+import com.example.core.common.MediaLibraryTab
+import com.example.core.common.MediaPermissionStatus
 import com.example.core.common.NetworkDiagnosticReport
 import com.example.core.common.NetworkHealthState
 import com.example.core.common.NetworkTransportMode
@@ -38,6 +41,7 @@ import com.example.core.common.UserSettings
 import com.example.core.common.VideoItem
 import com.example.core.common.ViewMode
 import com.example.core.media.MediaMutationResult
+import com.example.core.media.MediaPermissionHelper
 import com.example.core.media.PreparedMediaFile
 import com.example.core.media.VideoThumbnailLoader
 import com.example.core.network.ContentUriMediaSource
@@ -97,7 +101,13 @@ data class LibraryUiState(
     val selectedFolderName: String? = null,
     val sortOption: SortOption = SortOption.DATE_DESC,
     val viewMode: ViewMode = ViewMode.LIST,
-    val bannerMessage: String? = null
+    val bannerMessage: String? = null,
+    val allImages: List<ImageItem> = emptyList(),
+    val filteredImages: List<ImageItem> = emptyList(),
+    val availableImageFolderNames: List<String> = emptyList(),
+    val mediaStoreImageCount: Int = 0,
+    val activeMediaTab: MediaLibraryTab = MediaLibraryTab.VIDEOS,
+    val mediaPermissionStatus: MediaPermissionStatus = MediaPermissionStatus.FULL_ACCESS
 )
 
 class LumaCastViewModel(
@@ -109,9 +119,13 @@ class LumaCastViewModel(
         get() = container.thumbnailLoader
 
     private val _rawVideos = MutableStateFlow<List<VideoItem>>(emptyList())
+    private val _rawImages = MutableStateFlow<List<ImageItem>>(emptyList())
     private val _folders = MutableStateFlow<List<IndexedFolder>>(emptyList())
     private val _libraryAccessState = MutableStateFlow(LibraryAccessState.ACCESSIBLE)
     private val _mediaStoreCount = MutableStateFlow(0)
+    private val _mediaStoreImageCount = MutableStateFlow(0)
+    private val _activeMediaTab = MutableStateFlow(MediaLibraryTab.VIDEOS)
+    private val _mediaPermissionStatus = MutableStateFlow(MediaPermissionHelper.evaluatePermissionStatus(appContext))
     private val _isScanningLibrary = MutableStateFlow(true)
     private val _searchQuery = MutableStateFlow("")
     private val _selectedFolder = MutableStateFlow<String?>(null)
@@ -276,6 +290,59 @@ class LumaCastViewModel(
         )
     }.flowOn(Dispatchers.Default)
 
+    private val derivedImageFolderNames = _rawImages
+        .map { allImages ->
+            allImages
+                .map { it.folderName }
+                .filter { it.isNotBlank() }
+                .distinct()
+                .sortedBy { it.lowercase() }
+        }
+        .flowOn(Dispatchers.Default)
+
+    private val filteredImagesFlow = combine(
+        _rawImages,
+        _searchQuery,
+        _selectedFolder,
+        settings.map { it.sortOption }.distinctUntilChanged()
+    ) { allImages, query, folder, sortOption ->
+        container.videoRepository.filterAndSortImages(
+            images = allImages,
+            query = query,
+            sortOption = sortOption,
+            folderFilter = folder
+        )
+    }.flowOn(Dispatchers.Default)
+
+    private data class ImageSlice(
+        val allImages: List<ImageItem>,
+        val filteredImages: List<ImageItem>,
+        val folderNames: List<String>,
+        val mediaStoreImageCount: Int,
+        val activeTab: MediaLibraryTab,
+        val permissionStatus: MediaPermissionStatus
+    )
+
+    private val imageSliceFlow = combine(
+        _rawImages,
+        filteredImagesFlow,
+        derivedImageFolderNames,
+        _mediaStoreImageCount,
+        _activeMediaTab,
+        _mediaPermissionStatus
+    ) { values ->
+        @Suppress("UNCHECKED_CAST")
+        val allImgs = values[0] as List<ImageItem>
+        @Suppress("UNCHECKED_CAST")
+        val filteredImgs = values[1] as List<ImageItem>
+        @Suppress("UNCHECKED_CAST")
+        val imgFolders = values[2] as List<String>
+        val msImgCount = values[3] as Int
+        val tab = values[4] as MediaLibraryTab
+        val permStatus = values[5] as MediaPermissionStatus
+        ImageSlice(allImgs, filteredImgs, imgFolders, msImgCount, tab, permStatus)
+    }.flowOn(Dispatchers.Default)
+
     val libraryState: StateFlow<LibraryUiState> = combine(
         _isScanningLibrary,
         _rawVideos,
@@ -287,7 +354,8 @@ class LumaCastViewModel(
         settings.map { it.sortOption to it.viewMode }.distinctUntilChanged(),
         _bannerMessage,
         _libraryAccessState,
-        _mediaStoreCount
+        _mediaStoreCount,
+        imageSliceFlow
     ) { values ->
         val isLoading = values[0] as Boolean
         @Suppress("UNCHECKED_CAST")
@@ -305,6 +373,7 @@ class LumaCastViewModel(
         val banner = values[8] as String?
         val accessState = values[9] as LibraryAccessState
         val msCount = values[10] as Int
+        val imgSlice = values[11] as ImageSlice
 
         LibraryUiState(
             isLoading = isLoading,
@@ -319,7 +388,13 @@ class LumaCastViewModel(
             selectedFolderName = folder,
             sortOption = sortOption,
             viewMode = viewMode,
-            bannerMessage = banner
+            bannerMessage = banner,
+            allImages = imgSlice.allImages,
+            filteredImages = imgSlice.filteredImages,
+            availableImageFolderNames = imgSlice.folderNames,
+            mediaStoreImageCount = imgSlice.mediaStoreImageCount,
+            activeMediaTab = imgSlice.activeTab,
+            mediaPermissionStatus = imgSlice.permissionStatus
         )
     }.flowOn(Dispatchers.Default)
         .stateIn(viewModelScope, SharingStarted.Eagerly, LibraryUiState())
@@ -443,11 +518,14 @@ class LumaCastViewModel(
     ) {
         viewModelScope.launch {
             _isScanningLibrary.value = true
+            _mediaPermissionStatus.value = MediaPermissionHelper.evaluatePermissionStatus(appContext)
             val result = container.videoRepository.scanLibrary(safFolders, pickedVideos)
             _rawVideos.value = result.videos
+            _rawImages.value = result.images
             _folders.value = result.folders
             _libraryAccessState.value = result.accessState
             _mediaStoreCount.value = result.mediaStoreVideoCount
+            _mediaStoreImageCount.value = result.mediaStoreImageCount
             if (result.missingPickedVideoUris.isNotEmpty()) {
                 result.missingPickedVideoUris.forEach { missingUri ->
                     container.preferencesRepository.removePickedVideoUri(missingUri)
@@ -457,6 +535,38 @@ class LumaCastViewModel(
                 _bannerMessage.value = "Some previously added folders lost permission. Re-add them via Browse Folders."
             }
             _isScanningLibrary.value = false
+        }
+    }
+
+    fun refreshMediaPermissionStatus() {
+        _mediaPermissionStatus.value = MediaPermissionHelper.evaluatePermissionStatus(appContext)
+    }
+
+    fun onMediaPermissionsResult() {
+        val status = MediaPermissionHelper.evaluatePermissionStatus(appContext)
+        _mediaPermissionStatus.value = status
+        when (status) {
+            MediaPermissionStatus.FULL_ACCESS -> _bannerMessage.value = null
+            MediaPermissionStatus.PARTIAL_ACCESS -> {
+                _bannerMessage.value = "Limited media access granted. Tap Allow All to detect every video and photo."
+            }
+            MediaPermissionStatus.DENIED -> {
+                _bannerMessage.value = "Media permission is required to detect videos and images on your device."
+            }
+        }
+        refreshLibrary()
+    }
+
+    fun selectMediaTab(tab: MediaLibraryTab) {
+        if (_activeMediaTab.value == tab) return
+        _activeMediaTab.value = tab
+        val selected = _selectedFolder.value ?: return
+        val targetHasFolder = when (tab) {
+            MediaLibraryTab.VIDEOS -> _rawVideos.value.any { it.folderName.equals(selected, ignoreCase = true) }
+            MediaLibraryTab.IMAGES -> _rawImages.value.any { it.folderName.equals(selected, ignoreCase = true) }
+        }
+        if (!targetHasFolder) {
+            _selectedFolder.value = null
         }
     }
 
@@ -549,6 +659,94 @@ class LumaCastViewModel(
         _selectedFolder.value = video.folderName
         val pathSummary = video.relativePath?.takeIf { it.isNotBlank() } ?: video.folderName
         _bannerMessage.value = "Showing folder: $pathSummary"
+    }
+
+    fun castImage(image: ImageItem) {
+        viewModelScope.launch {
+            if (!container.videoRepository.verifyUriAccessible(image.uri)) {
+                _bannerMessage.value = "This photo is no longer accessible. Refreshing library…"
+                refreshLibrary()
+                return@launch
+            }
+            val netSnap = container.networkModeManager.refresh()
+            val lanIp = netSnap.preferredBindIpv4
+            if (!netSnap.isLocalCastNetworkReady || lanIp == null) {
+                _bannerMessage.value = "Connect to Wi-Fi or Hotspot to cast photos to TV."
+                return@launch
+            }
+            if (playbackState.value.connectionState != CastConnectionState.CONNECTED) {
+                _bannerMessage.value = "Connect to a Chromecast TV first to display photos."
+                return@launch
+            }
+            try {
+                if (!container.httpServer.isRunning) {
+                    container.httpServer.start(lanIp, settings.value.preferredServerPort)
+                } else {
+                    container.httpServer.rebindIfNeeded(lanIp, settings.value.preferredServerPort)
+                }
+                val source = ContentUriMediaSource(
+                    context = appContext,
+                    uri = image.uri,
+                    mimeType = image.mimeType.ifBlank { "image/jpeg" },
+                    displayName = image.displayName,
+                    knownSizeBytes = image.sizeBytes
+                )
+                val registered = container.httpServer.registerMedia(source)
+                container.castController.loadImage(
+                    image = image,
+                    streamUrl = registered.url,
+                    mimeType = registered.mimeType
+                ) { result ->
+                    result.onSuccess {
+                        val tvName = playbackState.value.connectedDeviceName ?: "TV"
+                        _bannerMessage.value = "Displaying ${image.displayName} on $tvName"
+                    }.onFailure { err ->
+                        _bannerMessage.value = err.message ?: "Failed to display photo on TV."
+                    }
+                }
+            } catch (e: Exception) {
+                _bannerMessage.value = e.message ?: "Failed to cast photo to TV."
+            }
+        }
+    }
+
+    fun shareImage(image: ImageItem) {
+        viewModelScope.launch {
+            if (!container.videoRepository.verifyUriAccessible(image.uri)) {
+                _bannerMessage.value = "This photo was moved or deleted. Refreshing library…"
+                refreshLibrary()
+                return@launch
+            }
+            val shareIntent = Intent(Intent.ACTION_SEND).apply {
+                type = image.mimeType.ifBlank { "image/*" }
+                putExtra(Intent.EXTRA_STREAM, image.uri)
+                putExtra(Intent.EXTRA_TITLE, image.displayName)
+                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            }
+            val chooser = Intent.createChooser(shareIntent, "Share ${image.displayName}").apply {
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            }
+            runCatching { appContext.startActivity(chooser) }.onFailure {
+                _bannerMessage.value = "No app available to share this image."
+            }
+        }
+    }
+
+    fun openImageLocally(image: ImageItem) {
+        viewModelScope.launch {
+            if (!container.videoRepository.verifyUriAccessible(image.uri)) {
+                _bannerMessage.value = "This photo was moved or deleted. Refreshing library…"
+                refreshLibrary()
+                return@launch
+            }
+            val viewIntent = Intent(Intent.ACTION_VIEW).apply {
+                setDataAndType(image.uri, image.mimeType.ifBlank { "image/*" })
+                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_ACTIVITY_NEW_TASK)
+            }
+            runCatching { appContext.startActivity(viewIntent) }.onFailure {
+                _bannerMessage.value = "No photo viewer app found to open ${image.displayName}."
+            }
+        }
     }
 
     fun renameVideo(video: VideoItem, newBaseName: String) {

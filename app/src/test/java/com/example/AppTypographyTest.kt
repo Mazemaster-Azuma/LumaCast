@@ -201,7 +201,7 @@ class AppTypographyTest {
         }
         composeRule.waitForIdle()
 
-        composeRule.onNodeWithText("Video").assertIsDisplayed()
+        composeRule.onNodeWithText("Media").assertIsDisplayed()
         composeRule.onNodeWithText("Interstellar_IMAX_Remux_2160p_HDR10.mkv").assertIsDisplayed()
         composeRule.onNodeWithText("MKV (Matroska)").assertIsDisplayed()
         composeRule.onNodeWithText("3840 × 2160").assertIsDisplayed()

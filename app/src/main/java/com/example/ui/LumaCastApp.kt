@@ -67,6 +67,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.vector.ImageVector
@@ -89,7 +90,9 @@ import androidx.navigation.navArgument
 import com.example.BuildConfig
 import com.example.R
 import com.example.core.common.CastConnectionState
+import com.example.core.common.MediaPermissionStatus
 import com.example.core.common.VideoItem
+import com.example.core.media.MediaPermissionHelper
 import com.example.core.update.AppUpdateState
 import com.example.ui.components.AppUpdateDialog
 import com.example.ui.components.MiniCastControllerBar
@@ -163,12 +166,13 @@ fun LumaCastApp(viewModel: LumaCastViewModel) {
     val appUpdateState by viewModel.appUpdateState.collectAsStateWithLifecycle()
     val showUpdateDialog by viewModel.showUpdateDialog.collectAsStateWithLifecycle()
 
-    // Automatically refresh library when returning to the app after external file imports or storage changes
+    // Automatically refresh library & media permission status when returning to the app
     var hasPassedInitialResume by remember { mutableStateOf(false) }
     DisposableEffect(lifecycleOwner) {
         val observer = LifecycleEventObserver { _, event ->
             if (event == Lifecycle.Event.ON_RESUME) {
                 viewModel.onInstallPermissionReturned()
+                viewModel.refreshMediaPermissionStatus()
                 if (hasPassedInitialResume) {
                     viewModel.refreshLibrary()
                 } else {
@@ -178,6 +182,26 @@ fun LumaCastApp(viewModel: LumaCastViewModel) {
         }
         lifecycleOwner.lifecycle.addObserver(observer)
         onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+    }
+
+    // Runtime visual media permissions (videos + images across Android 8–16)
+    val mediaPermissionsLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.RequestMultiplePermissions(),
+        onResult = { _ ->
+            viewModel.onMediaPermissionsResult()
+        }
+    )
+
+    var hasRequestedMediaPermissionOnLaunch by rememberSaveable { mutableStateOf(false) }
+    LaunchedEffect(currentRoute) {
+        if (!hasRequestedMediaPermissionOnLaunch &&
+            (currentRoute == LumaRoutes.LIBRARY || currentRoute == LumaRoutes.HOME)
+        ) {
+            hasRequestedMediaPermissionOnLaunch = true
+            if (MediaPermissionHelper.evaluatePermissionStatus(context) == MediaPermissionStatus.DENIED) {
+                mediaPermissionsLauncher.launch(MediaPermissionHelper.requiredMediaPermissions())
+            }
+        }
     }
 
     var hasNearbyWifiPermission by remember {
@@ -620,7 +644,19 @@ fun LumaCastApp(viewModel: LumaCastViewModel) {
                                     onShareVideo = viewModel::shareVideo,
                                     onOpenContainingFolder = viewModel::openContainingFolder,
                                     onRenameVideo = viewModel::renameVideo,
-                                    onDeleteVideo = viewModel::deleteVideo
+                                    onDeleteVideo = viewModel::deleteVideo,
+                                    onSelectMediaTab = viewModel::selectMediaTab,
+                                    onRequestMediaPermission = {
+                                        mediaPermissionsLauncher.launch(MediaPermissionHelper.requiredMediaPermissions())
+                                    },
+                                    onOpenAppSettings = {
+                                        runCatching {
+                                            context.startActivity(MediaPermissionHelper.createAppSettingsIntent(context))
+                                        }
+                                    },
+                                    onCastImage = viewModel::castImage,
+                                    onShareImage = viewModel::shareImage,
+                                    onOpenImageLocally = viewModel::openImageLocally
                                 )
                             }
 

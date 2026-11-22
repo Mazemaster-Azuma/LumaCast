@@ -16,6 +16,17 @@ enum class LibraryAccessState {
     EMPTY_NO_SOURCES
 }
 
+enum class MediaPermissionStatus {
+    FULL_ACCESS,
+    PARTIAL_ACCESS,
+    DENIED
+}
+
+enum class MediaLibraryTab(val label: String) {
+    VIDEOS("Videos"),
+    IMAGES("Images")
+}
+
 @Immutable
 data class VideoItem(
     val id: String,
@@ -68,6 +79,41 @@ data class VideoItem(
 
     val humanReadableFormat: String
         get() = Formatters.humanReadableContainerFormat(extension, mimeType)
+}
+
+@Immutable
+data class ImageItem(
+    val id: String,
+    val uri: Uri,
+    val title: String,
+    val displayName: String,
+    val sizeBytes: Long,
+    val width: Int,
+    val height: Int,
+    val mimeType: String,
+    val extension: String,
+    val dateAddedSec: Long,
+    val folderName: String,
+    val sourceType: VideoSourceType = VideoSourceType.MEDIA_STORE,
+    val dateModifiedSec: Long = dateAddedSec,
+    val relativePath: String? = null,
+    val bucketDisplayName: String? = null,
+    val orientationDegrees: Int = 0
+) {
+    val effectiveWidth: Int
+        get() = if (orientationDegrees == 90 || orientationDegrees == 270) height else width
+
+    val effectiveHeight: Int
+        get() = if (orientationDegrees == 90 || orientationDegrees == 270) width else height
+
+    val pixelCount: Long
+        get() = effectiveWidth.toLong() * effectiveHeight.toLong()
+
+    val exactResolutionLabel: String
+        get() = Formatters.formatExactResolution(width, height, orientationDegrees)
+
+    val formatLabel: String
+        get() = Formatters.humanReadableImageFormat(extension, mimeType)
 }
 
 @Immutable

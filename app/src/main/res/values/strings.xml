@@ -63,8 +63,19 @@
     <string name="cd_search_videos">Search videos</string>
     <string name="cd_video_more_options">More options for %1$s</string>
 
-    <!-- Video Library Screen -->
-    <string name="video_screen_title">Video</string>
+    <!-- Video & Image Library Screen -->
+    <string name="video_screen_title">Media</string>
+    <string name="library_tab_videos">Videos</string>
+    <string name="library_tab_images">Images</string>
+    <string name="library_search_images_hint">Search images by name, folder, or format</string>
+    <string name="media_permission_title">Allow access to your videos &amp; images</string>
+    <string name="media_permission_body">Grant permission so LumaCast can automatically detect all videos and photos stored on your Android device for browsing and casting to your TV.</string>
+    <string name="media_permission_grant_action">Grant Media Permission</string>
+    <string name="media_permission_settings_action">Open App Settings</string>
+    <string name="media_permission_partial_banner">Limited media access granted. Allow all photos &amp; videos to see your full library.</string>
+    <string name="media_permission_manage_action">Allow All</string>
+    <string name="action_cast_photo_to_tv">Cast Photo to TV</string>
+    <string name="cd_image_thumbnail">Image thumbnail</string>
     <string name="menu_cast">Cast to TV</string>
     <string name="menu_play_locally">Play locally</string>
     <string name="menu_video_details">Video details</string>
@@ -75,8 +86,8 @@
     <string name="menu_open_folder">Open containing folder</string>
     <string name="library_partial_access_title">Add folders or videos to expand library</string>
     <string name="library_partial_access_body">Android Scoped Storage keeps your files private. Link video folders via Browse Folders (SAF) or add clips via Photo Picker to include Movies, Camera, Download, WhatsApp, or Telegram videos.</string>
-    <string name="library_permission_denied_title">MediaStore access unavailable</string>
-    <string name="library_permission_denied_body">Grant folder access with Browse Folders (Storage Access Framework) or choose videos directly using the zero-permission Android Photo Picker.</string>
+    <string name="library_permission_denied_title">Media access permission required</string>
+    <string name="library_permission_denied_body">Allow access to your device photos and videos so LumaCast can detect all local media automatically.</string>
 
     <!-- In-App GitHub Updater -->
     <string name="update_section_title">App Updates</string>

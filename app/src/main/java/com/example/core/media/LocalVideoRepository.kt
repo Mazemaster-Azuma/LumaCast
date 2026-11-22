@@ -6,6 +6,7 @@ import android.content.ContentValues
 import android.content.Context
 import android.content.IntentSender
 import android.database.ContentObserver
+import android.graphics.BitmapFactory
 import android.media.MediaMetadataRetriever
 import android.net.Uri
 import android.os.Build
@@ -14,6 +15,7 @@ import android.os.Looper
 import android.provider.MediaStore
 import android.provider.OpenableColumns
 import androidx.documentfile.provider.DocumentFile
+import com.example.core.common.ImageItem
 import com.example.core.common.IndexedFolder
 import com.example.core.common.LibraryAccessState
 import com.example.core.common.SortOption
@@ -28,12 +30,14 @@ import java.util.Locale
 
 data class LibraryScanResult(
     val videos: List<VideoItem>,
+    val images: List<ImageItem> = emptyList(),
     val folders: List<IndexedFolder>,
     val mediaStoreAccessible: Boolean,
     val accessState: LibraryAccessState = LibraryAccessState.ACCESSIBLE,
     val revokedFolderUris: List<String> = emptyList(),
     val missingPickedVideoUris: List<String> = emptyList(),
-    val mediaStoreVideoCount: Int = 0
+    val mediaStoreVideoCount: Int = 0,
+    val mediaStoreImageCount: Int = 0
 )
 
 sealed interface MediaMutationResult {
@@ -67,7 +71,7 @@ class LocalVideoRepository(private val context: Context) {
                 trySend(Unit)
             }
         }
-        val registered = runCatching {
+        val videoRegistered = runCatching {
             context.contentResolver.registerContentObserver(
                 MediaStore.Video.Media.EXTERNAL_CONTENT_URI,
                 true,
@@ -75,9 +79,17 @@ class LocalVideoRepository(private val context: Context) {
             )
             true
         }.getOrDefault(false)
+        val imageRegistered = runCatching {
+            context.contentResolver.registerContentObserver(
+                MediaStore.Images.Media.EXTERNAL_CONTENT_URI,
+                true,
+                observer
+            )
+            true
+        }.getOrDefault(false)
 
         awaitClose {
-            if (registered) {
+            if (videoRegistered || imageRegistered) {
                 runCatching { context.contentResolver.unregisterContentObserver(observer) }
             }
         }
@@ -89,13 +101,17 @@ class LocalVideoRepository(private val context: Context) {
     ): LibraryScanResult = withContext(Dispatchers.IO) {
         val discovered = LinkedHashMap<String, VideoItem>()
         val dedupeNameSizeKeys = HashSet<String>()
+        val discoveredImages = LinkedHashMap<String, ImageItem>()
+        val dedupeImageKeys = HashSet<String>()
         val folders = mutableListOf<IndexedFolder>()
         val revokedFolders = mutableListOf<String>()
         val missingPicked = mutableListOf<String>()
 
-        // 1. Query MediaStore.Video.Media indexed collection (scoped-storage compliant)
-        var mediaStoreAccessible = true
+        // 1. Query MediaStore.Video.Media and MediaStore.Images.Media collections
+        var videoStoreAccessible = true
+        var imageStoreAccessible = true
         var mediaStoreCount = 0
+        var mediaStoreImageCount = 0
         try {
             val msVideos = queryMediaStoreVideos()
             mediaStoreCount = msVideos.size
@@ -106,12 +122,29 @@ class LocalVideoRepository(private val context: Context) {
                 }
             }
         } catch (_: SecurityException) {
-            mediaStoreAccessible = false
+            videoStoreAccessible = false
         } catch (_: Exception) {
-            mediaStoreAccessible = false
+            videoStoreAccessible = false
         }
 
-        // 2. Scan persisted Storage Access Framework (SAF) folders
+        try {
+            val msImages = queryMediaStoreImages()
+            mediaStoreImageCount = msImages.size
+            msImages.forEach { item ->
+                discoveredImages[item.uri.toString()] = item
+                if (item.sizeBytes > 0L) {
+                    dedupeImageKeys.add(dedupeKey(item.displayName, item.sizeBytes))
+                }
+            }
+        } catch (_: SecurityException) {
+            imageStoreAccessible = false
+        } catch (_: Exception) {
+            imageStoreAccessible = false
+        }
+
+        val mediaStoreAccessible = videoStoreAccessible || imageStoreAccessible
+
+        // 2. Scan persisted Storage Access Framework (SAF) folders (both videos and images)
         safFolderUris.forEach { uriStr ->
             val treeUri = runCatching { Uri.parse(uriStr) }.getOrNull() ?: return@forEach
             val docTree = runCatching { DocumentFile.fromTreeUri(context, treeUri) }.getOrNull()
@@ -121,6 +154,7 @@ class LocalVideoRepository(private val context: Context) {
             }
             val folderName = docTree.name?.takeIf { it.isNotBlank() } ?: "Selected Folder"
             val folderVideos = mutableListOf<VideoItem>()
+            val folderImages = mutableListOf<ImageItem>()
             scanDocumentTreeRecursive(
                 directory = docTree,
                 rootTreeUri = treeUri,
@@ -128,7 +162,8 @@ class LocalVideoRepository(private val context: Context) {
                 relativeSubPath = folderName,
                 depth = 0,
                 maxDepth = 5,
-                out = folderVideos
+                outVideos = folderVideos,
+                outImages = folderImages
             )
             folderVideos.forEach { item ->
                 val dupKey = dedupeKey(item.displayName, item.sizeBytes)
@@ -137,6 +172,15 @@ class LocalVideoRepository(private val context: Context) {
                 ) {
                     discovered[item.uri.toString()] = item
                     if (item.sizeBytes > 0L) dedupeNameSizeKeys.add(dupKey)
+                }
+            }
+            folderImages.forEach { item ->
+                val dupKey = dedupeKey(item.displayName, item.sizeBytes)
+                if (!discoveredImages.containsKey(item.uri.toString()) &&
+                    (item.sizeBytes <= 0L || !dedupeImageKeys.contains(dupKey))
+                ) {
+                    discoveredImages[item.uri.toString()] = item
+                    if (item.sizeBytes > 0L) dedupeImageKeys.add(dupKey)
                 }
             }
             folders += IndexedFolder(
@@ -163,22 +207,25 @@ class LocalVideoRepository(private val context: Context) {
         }
 
         val allVideos = discovered.values.toList()
+        val allImages = discoveredImages.values.toList()
         val accessState = classifyAccessState(
             mediaStoreAccessible = mediaStoreAccessible,
-            mediaStoreCount = mediaStoreCount,
+            mediaStoreCount = mediaStoreCount + mediaStoreImageCount,
             safFolderCount = folders.size,
             pickedVideoCount = pickedVideoUris.size - missingPicked.size,
-            totalVideos = allVideos.size
+            totalVideos = allVideos.size + allImages.size
         )
 
         LibraryScanResult(
             videos = allVideos,
+            images = allImages,
             folders = folders.sortedBy { it.displayName.lowercase(Locale.US) },
             mediaStoreAccessible = mediaStoreAccessible,
             accessState = accessState,
             revokedFolderUris = revokedFolders,
             missingPickedVideoUris = missingPicked,
-            mediaStoreVideoCount = mediaStoreCount
+            mediaStoreVideoCount = mediaStoreCount,
+            mediaStoreImageCount = mediaStoreImageCount
         )
     }
 
@@ -223,6 +270,47 @@ class LocalVideoRepository(private val context: Context) {
             )
             SortOption.RESOLUTION_DESC -> filtered.sortedWith(
                 compareByDescending<VideoItem> { it.pixelCount }
+                    .thenByDescending { it.effectiveWidth }
+                    .thenBy { it.displayName.lowercase(Locale.US) }
+            )
+        }
+    }
+
+    fun filterAndSortImages(
+        images: List<ImageItem>,
+        query: String,
+        sortOption: SortOption,
+        folderFilter: String? = null
+    ): List<ImageItem> {
+        val trimmed = query.trim().lowercase(Locale.US)
+        val filtered = images.filter { item ->
+            val matchesFolder = folderFilter == null || item.folderName.equals(folderFilter, ignoreCase = true)
+            val matchesQuery = trimmed.isEmpty() ||
+                item.displayName.lowercase(Locale.US).contains(trimmed) ||
+                item.title.lowercase(Locale.US).contains(trimmed) ||
+                item.folderName.lowercase(Locale.US).contains(trimmed) ||
+                item.relativePath?.lowercase(Locale.US)?.contains(trimmed) == true ||
+                item.formatLabel.lowercase(Locale.US).contains(trimmed) ||
+                item.exactResolutionLabel.lowercase(Locale.US).contains(trimmed)
+            matchesFolder && matchesQuery
+        }
+
+        return when (sortOption) {
+            SortOption.DATE_DESC, SortOption.DURATION_DESC -> filtered.sortedWith(
+                compareByDescending<ImageItem> { maxOf(it.dateAddedSec, it.dateModifiedSec) }
+                    .thenBy { it.displayName.lowercase(Locale.US) }
+            )
+            SortOption.DATE_ASC -> filtered.sortedWith(
+                compareBy<ImageItem> { maxOf(it.dateAddedSec, it.dateModifiedSec) }
+                    .thenBy { it.displayName.lowercase(Locale.US) }
+            )
+            SortOption.NAME_ASC -> filtered.sortedBy { it.displayName.lowercase(Locale.US) }
+            SortOption.SIZE_DESC -> filtered.sortedWith(
+                compareByDescending<ImageItem> { it.sizeBytes }
+                    .thenBy { it.displayName.lowercase(Locale.US) }
+            )
+            SortOption.RESOLUTION_DESC -> filtered.sortedWith(
+                compareByDescending<ImageItem> { it.pixelCount }
                     .thenByDescending { it.effectiveWidth }
                     .thenBy { it.displayName.lowercase(Locale.US) }
             )
@@ -483,6 +571,105 @@ class LocalVideoRepository(private val context: Context) {
         return result
     }
 
+    private fun queryMediaStoreImages(): List<ImageItem> {
+        val result = mutableListOf<ImageItem>()
+        val projectionList = mutableListOf(
+            MediaStore.Images.Media._ID,
+            MediaStore.Images.Media.TITLE,
+            MediaStore.Images.Media.DISPLAY_NAME,
+            MediaStore.Images.Media.SIZE,
+            MediaStore.Images.Media.WIDTH,
+            MediaStore.Images.Media.HEIGHT,
+            MediaStore.Images.Media.MIME_TYPE,
+            MediaStore.Images.Media.DATE_ADDED,
+            MediaStore.Images.Media.DATE_MODIFIED,
+            MediaStore.Images.Media.BUCKET_DISPLAY_NAME,
+            MediaStore.Images.Media.ORIENTATION
+        )
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            projectionList += MediaStore.Images.Media.RELATIVE_PATH
+        }
+
+        val sortOrder = "${MediaStore.Images.Media.DATE_ADDED} DESC"
+        context.contentResolver.query(
+            MediaStore.Images.Media.EXTERNAL_CONTENT_URI,
+            projectionList.toTypedArray(),
+            null,
+            null,
+            sortOrder
+        )?.use { cursor ->
+            val idIdx = cursor.getColumnIndex(MediaStore.Images.Media._ID)
+            val titleIdx = cursor.getColumnIndex(MediaStore.Images.Media.TITLE)
+            val nameIdx = cursor.getColumnIndex(MediaStore.Images.Media.DISPLAY_NAME)
+            val sizeIdx = cursor.getColumnIndex(MediaStore.Images.Media.SIZE)
+            val widthIdx = cursor.getColumnIndex(MediaStore.Images.Media.WIDTH)
+            val heightIdx = cursor.getColumnIndex(MediaStore.Images.Media.HEIGHT)
+            val mimeIdx = cursor.getColumnIndex(MediaStore.Images.Media.MIME_TYPE)
+            val dateAddedIdx = cursor.getColumnIndex(MediaStore.Images.Media.DATE_ADDED)
+            val dateModifiedIdx = cursor.getColumnIndex(MediaStore.Images.Media.DATE_MODIFIED)
+            val bucketIdx = cursor.getColumnIndex(MediaStore.Images.Media.BUCKET_DISPLAY_NAME)
+            val orientationIdx = cursor.getColumnIndex(MediaStore.Images.Media.ORIENTATION)
+            val relPathIdx = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                cursor.getColumnIndex(MediaStore.Images.Media.RELATIVE_PATH)
+            } else -1
+
+            if (idIdx < 0) return@use
+
+            while (cursor.moveToNext()) {
+                val id = cursor.getLong(idIdx)
+                val uri = ContentUris.withAppendedId(
+                    MediaStore.Images.Media.EXTERNAL_CONTENT_URI,
+                    id
+                )
+                val displayName = if (nameIdx >= 0) cursor.getString(nameIdx)?.takeIf { it.isNotBlank() } else null
+                val resolvedName = displayName ?: "Image_$id.jpg"
+                val title = (if (titleIdx >= 0) cursor.getString(titleIdx)?.takeIf { it.isNotBlank() } else null)
+                    ?: resolvedName.substringBeforeLast('.')
+                val ext = resolvedName.substringAfterLast('.', "").lowercase(Locale.US)
+                val mime = (if (mimeIdx >= 0) cursor.getString(mimeIdx)?.takeIf { it.isNotBlank() } else null)
+                    ?: guessImageMimeFromExtension(ext)
+                val sizeBytes = if (sizeIdx >= 0 && !cursor.isNull(sizeIdx)) cursor.getLong(sizeIdx).coerceAtLeast(0L) else 0L
+                var width = if (widthIdx >= 0 && !cursor.isNull(widthIdx)) cursor.getInt(widthIdx).coerceAtLeast(0) else 0
+                var height = if (heightIdx >= 0 && !cursor.isNull(heightIdx)) cursor.getInt(heightIdx).coerceAtLeast(0) else 0
+                val dateAddedSec = if (dateAddedIdx >= 0 && !cursor.isNull(dateAddedIdx)) cursor.getLong(dateAddedIdx) else 0L
+                val dateModifiedSec = if (dateModifiedIdx >= 0 && !cursor.isNull(dateModifiedIdx)) cursor.getLong(dateModifiedIdx) else dateAddedSec
+                val bucket = if (bucketIdx >= 0) cursor.getString(bucketIdx)?.takeIf { it.isNotBlank() } else null
+                val orientation = if (orientationIdx >= 0 && !cursor.isNull(orientationIdx)) cursor.getInt(orientationIdx) else 0
+                val relativePath = if (relPathIdx >= 0) cursor.getString(relPathIdx)?.takeIf { it.isNotBlank() } else null
+
+                if (width <= 0 || height <= 0) {
+                    val (w, h) = extractImageBounds(uri)
+                    if (width <= 0) width = w
+                    if (height <= 0) height = h
+                }
+
+                val folderLabel = bucket
+                    ?: relativePath?.trimEnd('/')?.substringAfterLast('/')?.takeIf { it.isNotBlank() }
+                    ?: "Device Photos"
+
+                result += ImageItem(
+                    id = "img_ms_$id",
+                    uri = uri,
+                    title = title,
+                    displayName = resolvedName,
+                    sizeBytes = sizeBytes,
+                    width = width,
+                    height = height,
+                    mimeType = mime,
+                    extension = ext,
+                    dateAddedSec = dateAddedSec,
+                    dateModifiedSec = dateModifiedSec,
+                    folderName = folderLabel,
+                    relativePath = relativePath,
+                    bucketDisplayName = bucket,
+                    orientationDegrees = orientation,
+                    sourceType = VideoSourceType.MEDIA_STORE
+                )
+            }
+        }
+        return result
+    }
+
     private fun scanDocumentTreeRecursive(
         directory: DocumentFile,
         rootTreeUri: Uri,
@@ -490,7 +677,8 @@ class LocalVideoRepository(private val context: Context) {
         relativeSubPath: String,
         depth: Int,
         maxDepth: Int,
-        out: MutableList<VideoItem>
+        outVideos: MutableList<VideoItem>,
+        outImages: MutableList<ImageItem>
     ) {
         if (depth > maxDepth) return
         val children = runCatching { directory.listFiles() }.getOrNull() ?: return
@@ -504,7 +692,8 @@ class LocalVideoRepository(private val context: Context) {
                     relativeSubPath = "$relativeSubPath/$childName",
                     depth = depth + 1,
                     maxDepth = maxDepth,
-                    out = out
+                    outVideos = outVideos,
+                    outImages = outImages
                 )
             } else if (child.isFile && isVideoDocument(child)) {
                 val name = child.name ?: "Video.mp4"
@@ -514,7 +703,7 @@ class LocalVideoRepository(private val context: Context) {
                 val meta = extractQuickMetadata(child.uri)
                 val modifiedSec = (child.lastModified() / 1000L).coerceAtLeast(0L)
                 val writable = runCatching { child.canWrite() }.getOrDefault(false)
-                out += VideoItem(
+                outVideos += VideoItem(
                     id = "saf_${child.uri.toString().hashCode()}",
                     uri = child.uri,
                     title = name.substringBeforeLast('.').ifBlank { name },
@@ -535,6 +724,30 @@ class LocalVideoRepository(private val context: Context) {
                     sourceType = VideoSourceType.SAF_FOLDER,
                     canRename = writable,
                     canDelete = writable
+                )
+            } else if (child.isFile && isImageDocument(child)) {
+                val name = child.name ?: "Image.jpg"
+                val ext = name.substringAfterLast('.', "").lowercase(Locale.US)
+                val mime = child.type?.takeIf { it.startsWith("image/") }
+                    ?: guessImageMimeFromExtension(ext)
+                val (width, height) = extractImageBounds(child.uri)
+                val modifiedSec = (child.lastModified() / 1000L).coerceAtLeast(0L)
+                outImages += ImageItem(
+                    id = "img_saf_${child.uri.toString().hashCode()}",
+                    uri = child.uri,
+                    title = name.substringBeforeLast('.').ifBlank { name },
+                    displayName = name,
+                    sizeBytes = child.length().coerceAtLeast(0L),
+                    width = width,
+                    height = height,
+                    mimeType = mime,
+                    extension = ext,
+                    dateAddedSec = modifiedSec,
+                    dateModifiedSec = modifiedSec,
+                    folderName = rootFolderName,
+                    relativePath = "$relativeSubPath/",
+                    bucketDisplayName = rootFolderName,
+                    sourceType = VideoSourceType.SAF_FOLDER
                 )
             }
         }
@@ -628,6 +841,18 @@ class LocalVideoRepository(private val context: Context) {
         }
     }
 
+    private fun extractImageBounds(uri: Uri): Pair<Int, Int> {
+        return try {
+            val opts = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+            context.contentResolver.openInputStream(uri)?.use { stream ->
+                BitmapFactory.decodeStream(stream, null, opts)
+            }
+            opts.outWidth.coerceAtLeast(0) to opts.outHeight.coerceAtLeast(0)
+        } catch (_: Exception) {
+            0 to 0
+        }
+    }
+
     private fun isVideoDocument(doc: DocumentFile): Boolean {
         val mime = doc.type?.lowercase(Locale.US)
         if (mime != null && mime.startsWith("video/")) return true
@@ -635,9 +860,20 @@ class LocalVideoRepository(private val context: Context) {
         return ext in SUPPORTED_VIDEO_EXTENSIONS
     }
 
+    private fun isImageDocument(doc: DocumentFile): Boolean {
+        val mime = doc.type?.lowercase(Locale.US)
+        if (mime != null && mime.startsWith("image/")) return true
+        val ext = doc.name?.substringAfterLast('.', "")?.lowercase(Locale.US) ?: return false
+        return ext in SUPPORTED_IMAGE_EXTENSIONS
+    }
+
     companion object {
         private val SUPPORTED_VIDEO_EXTENSIONS = setOf(
             "mp4", "m4v", "mkv", "webm", "mov", "avi", "ts", "m2ts", "3gp", "flv", "wmv", "mpg", "mpeg"
+        )
+
+        private val SUPPORTED_IMAGE_EXTENSIONS = setOf(
+            "jpg", "jpeg", "png", "webp", "gif", "heic", "heif", "bmp", "avif"
         )
 
         fun dedupeKey(displayName: String, sizeBytes: Long): String {
@@ -671,6 +907,18 @@ class LocalVideoRepository(private val context: Context) {
             "wmv" -> "video/x-ms-wmv"
             "mpg", "mpeg" -> "video/mpeg"
             else -> "video/mp4"
+        }
+
+        fun guessImageMimeFromExtension(ext: String): String = when (ext.lowercase(Locale.US)) {
+            "jpg", "jpeg" -> "image/jpeg"
+            "png" -> "image/png"
+            "webp" -> "image/webp"
+            "gif" -> "image/gif"
+            "heic" -> "image/heic"
+            "heif" -> "image/heif"
+            "bmp" -> "image/bmp"
+            "avif" -> "image/avif"
+            else -> "image/jpeg"
         }
     }
 }

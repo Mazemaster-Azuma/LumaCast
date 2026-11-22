@@ -98,6 +98,27 @@ object Formatters {
         }
     }
 
+    /**
+     * Maps image file extension / MIME type to a crisp, human-readable image format label.
+     */
+    fun humanReadableImageFormat(extension: String, mimeType: String): String {
+        val ext = extension.lowercase(Locale.US).trim()
+        val mime = mimeType.lowercase(Locale.US).trim()
+        return when {
+            ext == "jpg" || ext == "jpeg" || mime == "image/jpeg" -> "JPEG"
+            ext == "png" || mime == "image/png" -> "PNG"
+            ext == "webp" || mime == "image/webp" -> "WebP"
+            ext == "heic" || ext == "heif" || mime == "image/heic" || mime == "image/heif" -> "HEIF"
+            ext == "gif" || mime == "image/gif" -> "GIF"
+            ext == "avif" || mime == "image/avif" -> "AVIF"
+            ext == "bmp" || mime == "image/bmp" -> "BMP"
+            ext == "dng" || mime == "image/x-adobe-dng" -> "RAW (DNG)"
+            ext.isNotBlank() -> ext.uppercase(Locale.US)
+            mime.startsWith("image/") -> mime.removePrefix("image/").uppercase(Locale.US)
+            else -> "Image"
+        }
+    }
+
     fun aspectRatioLabel(width: Int, height: Int): String {
         if (width <= 0 || height <= 0) return "Unknown"
         val ratio = width.toFloat() / height.toFloat()

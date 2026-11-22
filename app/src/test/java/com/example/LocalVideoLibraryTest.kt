@@ -1,22 +1,29 @@
 package com.example
 
+import android.Manifest
 import android.content.Context
 import android.graphics.Bitmap
 import android.net.Uri
+import android.os.Build
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
+import androidx.compose.ui.test.performScrollTo
 import androidx.test.core.app.ApplicationProvider
 import com.example.core.common.CastConnectionState
 import com.example.core.common.Formatters
+import com.example.core.common.ImageItem
 import com.example.core.common.LibraryAccessState
+import com.example.core.common.MediaLibraryTab
+import com.example.core.common.MediaPermissionStatus
 import com.example.core.common.SortOption
 import com.example.core.common.VideoItem
 import com.example.core.common.VideoSourceType
 import com.example.core.common.ViewMode
 import com.example.core.media.LocalVideoRepository
+import com.example.core.media.MediaPermissionHelper
 import com.example.core.media.VideoThumbnailLoader
 import com.example.ui.LibraryUiState
 import com.example.ui.screens.LibraryScreen
@@ -281,7 +288,7 @@ class LocalVideoLibraryTest {
         composeRule.waitForIdle()
 
         // Top bar elements
-        composeRule.onNodeWithText("Video").assertIsDisplayed()
+        composeRule.onNodeWithText("Media").assertIsDisplayed()
         composeRule.onNodeWithTag("library_add_videos_button").assertDoesNotExist()
         composeRule.onNodeWithTag("library_add_folder_button").assertDoesNotExist()
         composeRule.onNodeWithTag("video_menu_drawer_button").performClick()
@@ -309,5 +316,249 @@ class LocalVideoLibraryTest {
         // Tap row -> Video details
         composeRule.onNodeWithTag("video_row_ms_2").performClick()
         assertEquals("ms_2", detailsClickedId)
+    }
+
+    private fun sampleImages(): List<ImageItem> = listOf(
+        ImageItem(
+            id = "img_ms_1",
+            uri = Uri.parse("content://media/external/images/media/1"),
+            title = "Sunset_HDR",
+            displayName = "Sunset_HDR.jpg",
+            sizeBytes = 6_400_000L,
+            width = 4032,
+            height = 3024,
+            mimeType = "image/jpeg",
+            extension = "jpg",
+            dateAddedSec = 1_700_000_200L,
+            dateModifiedSec = 1_700_000_200L,
+            folderName = "Camera",
+            relativePath = "DCIM/Camera/",
+            orientationDegrees = 0
+        ),
+        ImageItem(
+            id = "img_ms_2",
+            uri = Uri.parse("content://media/external/images/media/2"),
+            title = "Portrait_Shot",
+            displayName = "Portrait_Shot.png",
+            sizeBytes = 2_100_000L,
+            width = 2160,
+            height = 1080,
+            mimeType = "image/png",
+            extension = "png",
+            dateAddedSec = 1_700_000_600L,
+            dateModifiedSec = 1_700_000_600L,
+            folderName = "Pictures",
+            relativePath = "Pictures/",
+            orientationDegrees = 90
+        )
+    )
+
+    @Test
+    fun `media permission helper maps sdk levels and permission states accurately`() {
+        val perms30 = MediaPermissionHelper.requiredMediaPermissions(Build.VERSION_CODES.R)
+        assertEquals(listOf(Manifest.permission.READ_EXTERNAL_STORAGE), perms30.toList())
+
+        val perms33 = MediaPermissionHelper.requiredMediaPermissions(Build.VERSION_CODES.TIRAMISU)
+        assertEquals(
+            listOf(Manifest.permission.READ_MEDIA_VIDEO, Manifest.permission.READ_MEDIA_IMAGES),
+            perms33.toList()
+        )
+
+        val perms34 = MediaPermissionHelper.requiredMediaPermissions(Build.VERSION_CODES.UPSIDE_DOWN_CAKE)
+        assertEquals(
+            listOf(
+                Manifest.permission.READ_MEDIA_VIDEO,
+                Manifest.permission.READ_MEDIA_IMAGES,
+                Manifest.permission.READ_MEDIA_VISUAL_USER_SELECTED
+            ),
+            perms34.toList()
+        )
+
+        // Android 14+ evaluation
+        assertEquals(
+            MediaPermissionStatus.FULL_ACCESS,
+            MediaPermissionHelper.evaluateFromCheck(Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+                it == Manifest.permission.READ_MEDIA_VIDEO || it == Manifest.permission.READ_MEDIA_IMAGES
+            }
+        )
+        assertEquals(
+            MediaPermissionStatus.PARTIAL_ACCESS,
+            MediaPermissionHelper.evaluateFromCheck(Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+                it == Manifest.permission.READ_MEDIA_VISUAL_USER_SELECTED
+            }
+        )
+        assertEquals(
+            MediaPermissionStatus.DENIED,
+            MediaPermissionHelper.evaluateFromCheck(Build.VERSION_CODES.UPSIDE_DOWN_CAKE) { false }
+        )
+
+        // Android 13 evaluation
+        assertEquals(
+            MediaPermissionStatus.PARTIAL_ACCESS,
+            MediaPermissionHelper.evaluateFromCheck(Build.VERSION_CODES.TIRAMISU) {
+                it == Manifest.permission.READ_MEDIA_IMAGES
+            }
+        )
+
+        // Android 11 evaluation
+        assertEquals(
+            MediaPermissionStatus.FULL_ACCESS,
+            MediaPermissionHelper.evaluateFromCheck(Build.VERSION_CODES.R) {
+                it == Manifest.permission.READ_EXTERNAL_STORAGE
+            }
+        )
+        assertEquals(
+            MediaPermissionStatus.DENIED,
+            MediaPermissionHelper.evaluateFromCheck(Build.VERSION_CODES.R) { false }
+        )
+    }
+
+    @Test
+    fun `image repository filtering sorting and format helpers work accurately`() {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val repo = LocalVideoRepository(context)
+        val images = sampleImages()
+
+        assertEquals("JPEG", images[0].formatLabel)
+        assertEquals("4032 × 3024", images[0].exactResolutionLabel)
+        assertEquals("PNG", images[1].formatLabel)
+        assertEquals("1080 × 2160", images[1].exactResolutionLabel)
+
+        val newest = repo.filterAndSortImages(images, "", SortOption.DATE_DESC)
+        assertEquals(listOf("img_ms_2", "img_ms_1"), newest.map { it.id })
+
+        val bySize = repo.filterAndSortImages(images, "", SortOption.SIZE_DESC)
+        assertEquals(listOf("img_ms_1", "img_ms_2"), bySize.map { it.id })
+
+        val byFolder = repo.filterAndSortImages(images, "", SortOption.DATE_DESC, folderFilter = "Camera")
+        assertEquals(listOf("img_ms_1"), byFolder.map { it.id })
+    }
+
+    @Test
+    fun `library screen switches between videos and images tabs and surfaces permission prompts`() {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val loader = VideoThumbnailLoader(context)
+        val images = sampleImages()
+        var selectedTab: MediaLibraryTab? = null
+        var grantClicked = false
+        var settingsClicked = false
+
+        composeRule.setContent {
+            LumaCastTheme {
+                LibraryScreen(
+                    state = LibraryUiState(
+                        isLoading = false,
+                        allVideos = emptyList(),
+                        filteredVideos = emptyList(),
+                        allImages = images,
+                        filteredImages = images,
+                        availableImageFolderNames = listOf("Camera", "Pictures"),
+                        activeMediaTab = MediaLibraryTab.IMAGES,
+                        mediaPermissionStatus = MediaPermissionStatus.PARTIAL_ACCESS,
+                        viewMode = ViewMode.LIST
+                    ),
+                    thumbnailLoader = loader,
+                    connectionState = CastConnectionState.CONNECTED,
+                    connectedDeviceName = "Living Room TV",
+                    discoveredDeviceCount = 1,
+                    onOpenDrawer = {},
+                    onOpenHelp = {},
+                    onOpenCastDevices = {},
+                    onSearchChange = {},
+                    onSortChange = {},
+                    onViewModeChange = {},
+                    onFolderFilterChange = {},
+                    onRefresh = {},
+                    onDismissBanner = {},
+                    onVideoClick = {},
+                    onCastVideo = {},
+                    onPlayLocally = {},
+                    onShareVideo = {},
+                    onOpenContainingFolder = {},
+                    onRenameVideo = { _, _ -> },
+                    onDeleteVideo = {},
+                    onSelectMediaTab = { selectedTab = it },
+                    onRequestMediaPermission = { grantClicked = true },
+                    onOpenAppSettings = { settingsClicked = true }
+                )
+            }
+        }
+        composeRule.waitForIdle()
+
+        // Partial access banner + allow all CTA
+        composeRule.onNodeWithTag("library_partial_access_banner").assertIsDisplayed()
+        composeRule.onNodeWithTag("library_manage_media_permission_button").performClick()
+        assertTrue(grantClicked)
+
+        // Images list & preview dialog
+        composeRule.onNodeWithText("Sunset_HDR.jpg").assertIsDisplayed()
+        composeRule.onNodeWithTag("image_row_img_ms_1").performClick()
+        composeRule.waitForIdle()
+        composeRule.onNodeWithTag("image_preview_dialog").assertIsDisplayed()
+        composeRule.onNodeWithTag("image_preview_close_button").performClick()
+
+        // Switching tabs
+        composeRule.onNodeWithTag("library_tab_videos").performClick()
+        assertEquals(MediaLibraryTab.VIDEOS, selectedTab)
+        assertFalse(settingsClicked)
+    }
+
+    @Test
+    fun `library screen empty state displays grant permission and app settings buttons when denied`() {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val loader = VideoThumbnailLoader(context)
+        var grantClicked = false
+        var settingsClicked = false
+
+        composeRule.setContent {
+            LumaCastTheme {
+                LibraryScreen(
+                    state = LibraryUiState(
+                        isLoading = false,
+                        allVideos = emptyList(),
+                        filteredVideos = emptyList(),
+                        allImages = emptyList(),
+                        filteredImages = emptyList(),
+                        accessState = LibraryAccessState.MEDIA_STORE_UNAVAILABLE,
+                        mediaPermissionStatus = MediaPermissionStatus.DENIED,
+                        viewMode = ViewMode.LIST
+                    ),
+                    thumbnailLoader = loader,
+                    connectionState = CastConnectionState.DISCONNECTED,
+                    connectedDeviceName = null,
+                    discoveredDeviceCount = 0,
+                    onOpenDrawer = {},
+                    onOpenHelp = {},
+                    onOpenCastDevices = {},
+                    onSearchChange = {},
+                    onSortChange = {},
+                    onViewModeChange = {},
+                    onFolderFilterChange = {},
+                    onRefresh = {},
+                    onDismissBanner = {},
+                    onVideoClick = {},
+                    onCastVideo = {},
+                    onPlayLocally = {},
+                    onShareVideo = {},
+                    onOpenContainingFolder = {},
+                    onRenameVideo = { _, _ -> },
+                    onDeleteVideo = {},
+                    onRequestMediaPermission = { grantClicked = true },
+                    onOpenAppSettings = { settingsClicked = true }
+                )
+            }
+        }
+        composeRule.waitForIdle()
+
+        composeRule.onNodeWithTag("library_grant_media_permission_button")
+            .performScrollTo()
+            .assertIsDisplayed()
+            .performClick()
+        assertTrue(grantClicked)
+        composeRule.onNodeWithTag("library_open_app_settings_button")
+            .performScrollTo()
+            .assertIsDisplayed()
+            .performClick()
+        assertTrue(settingsClicked)
     }
 }
